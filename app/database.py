@@ -27,3 +27,18 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
+
+
+def query_documents(page: int, page_size: int) -> tuple[list[dict], int]:
+    """Return (documents, total) for the given page. Shared by API and pages."""
+    offset = (page - 1) * page_size
+    conn = get_db()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM documents ORDER BY id DESC LIMIT ? OFFSET ?",
+            (page_size, offset),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows], total

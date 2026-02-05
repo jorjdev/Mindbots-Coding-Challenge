@@ -1,7 +1,5 @@
 import io
 
-import magic
-
 from app import config
 
 
@@ -201,21 +199,3 @@ def test_delete_document(client):
 def test_delete_not_found(client):
     response = client.delete("/documents/999")
     assert response.status_code == 404
-
-
-# --- Auth tests ---
-
-
-def test_api_key_required_when_set(auth_client):
-    response = auth_client.get("/documents")
-    assert response.status_code == 401
-
-
-def test_api_key_accepted(auth_client):
-    response = auth_client.get("/documents", headers={"X-API-Key": "test-secret-key"})
-    assert response.status_code == 200
-
-
-def test_api_key_wrong(auth_client):
-    response = auth_client.get("/documents", headers={"X-API-Key": "wrong-key"})
-    assert response.status_code == 401

@@ -9,7 +9,6 @@ Built with **Python**, **FastAPI**, and **SQLite**.
 ```bash
 pip install -r requirements.txt
 brew install libmagic  # required by python-magic for file content validation
-cp .env.example .env   # optional — edit to configure
 ```
 
 ## Run the server
@@ -31,18 +30,11 @@ Web UI at `http://localhost:8000/`.
 | GET | `/documents/{id}/download` | Download the file |
 | DELETE | `/documents/{id}` | Delete a document |
 
-## Authentication
-
-Set `API_KEY` env var to enable API key authentication. Pass the key via the `X-API-Key` header. When unset, auth is disabled (development mode). The web UI is exempt from API key auth.
-
 ## Examples
 
 ```bash
 # Upload a PDF
 curl -X POST -F "file=@report.pdf" http://localhost:8000/documents
-
-# Upload with auth
-curl -X POST -H "X-API-Key: your-key" -F "file=@report.pdf" http://localhost:8000/documents
 
 # List documents
 curl http://localhost:8000/documents?page=1&page_size=5
@@ -59,29 +51,30 @@ curl -X DELETE http://localhost:8000/documents/1
 
 ## Configuration
 
-All settings are configurable via environment variables. See `.env.example` for the full list:
+All settings are configurable via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | `./documents.db` | SQLite database path |
 | `UPLOAD_DIR` | `./uploads` | File storage directory |
-| `API_KEY` | _(none)_ | API key for auth (disabled if unset) |
 | `CORS_ORIGINS` | _(empty)_ | Comma-separated allowed origins |
 | `MAX_FILE_SIZE` | `10485760` | Max upload size in bytes (10 MB) |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `DEBUG` | `false` | Show detailed errors in 500 responses |
-| `CSRF_SECRET` | _(dev default)_ | Secret for CSRF token signing |
+| `CSRF_SECRET` | _(auto-generated)_ | Secret for CSRF token signing |
 
 ## Security
 
-- API key authentication (optional)
-- CSRF protection on web UI forms
-- Security headers: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`
-- File content validation via magic bytes (not just extension)
-- Filename sanitization (strips path traversal, special characters)
-- 10 MB upload size limit
-- Rate limiting via slowapi
-- CORS policy (configurable)
+The API implements multiple layers of security:
+
+- **CSRF protection** on web UI forms (signed tokens with expiration)
+- **Security headers**: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`
+- **File content validation** via magic bytes (not just extension checking)
+- **Filename sanitization** (strips path traversal attempts, special characters)
+- **10 MB upload size limit** (configurable)
+- **Rate limiting** via slowapi (30 req/min for uploads, 60 req/min for reads)
+- **CORS policy** (configurable allowed origins)
+- **Input validation** on all endpoints
 
 ## Run tests
 

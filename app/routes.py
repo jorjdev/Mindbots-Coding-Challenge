@@ -5,16 +5,20 @@ from pathlib import PurePath
 from uuid import uuid4
 
 import magic
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app import config
-from app.database import get_db
+from app.database import get_db, query_documents
 from app.models import DocumentListResponse, DocumentMetadata
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
+
+router = APIRouter(prefix="/documents")
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -25,8 +29,9 @@ def _sanitize_filename(filename: str) -> str:
     return name
 
 
-@router.post("/documents", response_model=DocumentMetadata, status_code=201)
-async def upload_document(file: UploadFile = File(...)):
+@router.post("", response_model=DocumentMetadata, status_code=201)
+@limiter.limit("30/minute")
+async def upload_document(request: Request, file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
 
@@ -65,8 +70,8 @@ async def upload_document(file: UploadFile = File(...)):
     storage_name = f"{uuid4()}_{safe_filename}"
     storage_path = config.UPLOAD_DIR / storage_name
 
+    # Write file, then insert DB row. Clean up file if DB fails.
     storage_path.write_bytes(content)
-
     timestamp = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     try:
@@ -76,6 +81,9 @@ async def upload_document(file: UploadFile = File(...)):
         )
         conn.commit()
         doc_id = cursor.lastrowid
+    except Exception:
+        storage_path.unlink(missing_ok=True)
+        raise
     finally:
         conn.close()
 
@@ -90,21 +98,14 @@ async def upload_document(file: UploadFile = File(...)):
     )
 
 
-@router.get("/documents", response_model=DocumentListResponse)
+@router.get("", response_model=DocumentListResponse)
+@limiter.limit("60/minute")
 async def list_documents(
+    request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
 ):
-    offset = (page - 1) * page_size
-    conn = get_db()
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        rows = conn.execute(
-            "SELECT * FROM documents ORDER BY id DESC LIMIT ? OFFSET ?",
-            (page_size, offset),
-        ).fetchall()
-    finally:
-        conn.close()
+    rows, total = query_documents(page, page_size)
 
     documents = [
         DocumentMetadata(
@@ -122,8 +123,9 @@ async def list_documents(
     )
 
 
-@router.get("/documents/{document_id}", response_model=DocumentMetadata)
-async def get_document(document_id: int):
+@router.get("/{document_id}", response_model=DocumentMetadata)
+@limiter.limit("60/minute")
+async def get_document(request: Request, document_id: int):
     conn = get_db()
     try:
         row = conn.execute(
@@ -144,8 +146,9 @@ async def get_document(document_id: int):
     )
 
 
-@router.get("/documents/{document_id}/download")
-async def download_document(document_id: int):
+@router.get("/{document_id}/download")
+@limiter.limit("60/minute")
+async def download_document(request: Request, document_id: int):
     conn = get_db()
     try:
         row = conn.execute(
@@ -168,8 +171,9 @@ async def download_document(document_id: int):
     )
 
 
-@router.delete("/documents/{document_id}", status_code=204)
-async def delete_document(document_id: int):
+@router.delete("/{document_id}", status_code=204)
+@limiter.limit("30/minute")
+async def delete_document(request: Request, document_id: int):
     conn = get_db()
     try:
         row = conn.execute(

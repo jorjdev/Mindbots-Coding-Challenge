@@ -1,16 +1,14 @@
 import logging
 import math
 import secrets
-from pathlib import PurePath
 
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app import config
-from app.database import get_db
-from app.routes import delete_document, upload_document
+from app.database import query_documents
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +18,9 @@ templates = Jinja2Templates(
 
 router = APIRouter()
 
-_csrf_serializer = URLSafeSerializer(config.CSRF_SECRET, salt="csrf")
+_csrf_serializer = URLSafeTimedSerializer(config.CSRF_SECRET, salt="csrf")
+
+CSRF_MAX_AGE = 3600  # 1 hour
 
 
 def _generate_csrf_token() -> str:
@@ -29,34 +29,25 @@ def _generate_csrf_token() -> str:
 
 def _validate_csrf_token(token: str) -> bool:
     try:
-        _csrf_serializer.loads(token)
+        _csrf_serializer.loads(token, max_age=CSRF_MAX_AGE)
         return True
-    except BadSignature:
+    except (BadSignature, SignatureExpired):
         return False
 
 
 def _get_page_context(page: int, page_size: int):
-    offset = (page - 1) * page_size
-    conn = get_db()
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        rows = conn.execute(
-            "SELECT * FROM documents ORDER BY id DESC LIMIT ? OFFSET ?",
-            (page_size, offset),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    documents = [dict(row) for row in rows]
+    rows, total = query_documents(page, page_size)
     total_pages = max(1, math.ceil(total / page_size))
-
     return {
-        "documents": documents,
+        "documents": rows,
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
     }
+
+
+# --- Main UI ---
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -75,11 +66,19 @@ async def index(
         message = "Document deleted."
     elif msg == "err":
         message = "Upload failed. Please try again."
+    elif msg == "del_err":
+        message = "Delete failed. Please try again."
+        success = False
 
     csrf_token = _generate_csrf_token()
     return templates.TemplateResponse(
         request, "index.html",
-        {**ctx, "message": message, "success": success, "csrf_token": csrf_token},
+        {
+            **ctx,
+            "message": message,
+            "success": success,
+            "csrf_token": csrf_token,
+        },
     )
 
 
@@ -94,37 +93,22 @@ async def index_upload(
         new_csrf = _generate_csrf_token()
         return templates.TemplateResponse(
             request, "index.html",
-            {**ctx, "message": "Invalid CSRF token. Please try again.", "success": False, "csrf_token": new_csrf},
+            {
+                **ctx,
+                "message": "Invalid or expired CSRF token. Please try again.",
+                "success": False,
+                "csrf_token": new_csrf,
+            },
         )
 
-    suffix = PurePath(file.filename or "").suffix.lower()
-
-    if not file.filename or suffix not in config.ALLOWED_TYPES:
-        ctx = _get_page_context(1, 10)
-        new_csrf = _generate_csrf_token()
-        return templates.TemplateResponse(
-            request, "index.html",
-            {**ctx, "message": "Unsupported file type. Allowed: PDF, TXT, DOCX", "success": False, "csrf_token": new_csrf},
-        )
-
-    content = await file.read()
-    if len(content) == 0:
-        ctx = _get_page_context(1, 10)
-        new_csrf = _generate_csrf_token()
-        return templates.TemplateResponse(
-            request, "index.html",
-            {**ctx, "message": "File must not be empty.", "success": False, "csrf_token": new_csrf},
-        )
-
-    # Reset file position and delegate to the API handler
-    await file.seek(0)
+    # Delegate to the API upload handler
+    from app.routes import upload_document
     try:
-        await upload_document(file)
+        await upload_document(request, file)
     except Exception as e:
         logger.error("Upload failed via UI: %s", e)
         return RedirectResponse("/?msg=err", status_code=303)
 
-    # Post-Redirect-Get: redirect to avoid duplicate on refresh
     return RedirectResponse("/?msg=ok", status_code=303)
 
 
@@ -133,9 +117,11 @@ async def index_delete(request: Request, document_id: int, csrf_token: str = For
     if not _validate_csrf_token(csrf_token):
         return RedirectResponse("/", status_code=303)
 
+    from app.routes import delete_document
     try:
-        await delete_document(document_id)
+        await delete_document(request, document_id)
     except Exception as e:
         logger.error("Delete failed via UI: %s", e)
+        return RedirectResponse("/?msg=del_err", status_code=303)
 
     return RedirectResponse("/?msg=deleted", status_code=303)
