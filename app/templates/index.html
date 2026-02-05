@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document API</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem 1rem; color: #1a1a1a; background: #fafafa; }
+        h1 { margin-bottom: 1.5rem; }
+        h2 { margin-bottom: 1rem; font-size: 1.2rem; }
+
+        /* Upload form */
+        .upload-card {
+            background: #fff; border: 1px solid #ddd; border-radius: 8px;
+            padding: 1.5rem; margin-bottom: 2rem;
+        }
+        .upload-card form { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+        .upload-card input[type="file"] { flex: 1; min-width: 200px; }
+        .upload-card button {
+            padding: 0.5rem 1.25rem; background: #2563eb; color: #fff;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+        }
+        .upload-card button:hover { background: #1d4ed8; }
+        .allowed { font-size: 0.8rem; color: #666; margin-top: 0.5rem; }
+
+        /* Messages */
+        .msg { padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
+        .msg.ok { background: #dcfce7; color: #166534; }
+        .msg.err { background: #fee2e2; color: #991b1b; }
+
+        /* Table */
+        table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
+        th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+        th { background: #f3f4f6; font-weight: 600; }
+        tr:last-child td { border-bottom: none; }
+        td a { color: #2563eb; text-decoration: none; }
+        td a:hover { text-decoration: underline; }
+
+        /* Pagination */
+        .pagination { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; font-size: 0.9rem; }
+        .pagination a {
+            padding: 0.35rem 0.75rem; border: 1px solid #ddd; border-radius: 4px;
+            text-decoration: none; color: #2563eb;
+        }
+        .pagination a:hover { background: #f3f4f6; }
+        .pagination .disabled { color: #999; pointer-events: none; }
+        .empty { color: #666; font-style: italic; padding: 1rem 0; }
+    </style>
+</head>
+<body>
+    <h1>Document API</h1>
+
+    <!-- Upload -->
+    <div class="upload-card">
+        <h2>Upload Document</h2>
+        <form action="/" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" accept=".pdf,.txt,.docx" required>
+            <button type="submit">Upload</button>
+        </form>
+        <p class="allowed">Allowed: PDF, TXT, DOCX</p>
+    </div>
+
+    <!-- Flash message -->
+    {% if message %}
+    <div class="msg {{ 'ok' if success else 'err' }}">{{ message }}</div>
+    {% endif %}
+
+    <!-- Document list -->
+    <h2>Documents ({{ total }})</h2>
+    {% if documents %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Filename</th>
+                <th>Type</th>
+                <th>Size</th>
+                <th>Uploaded</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for doc in documents %}
+            <tr>
+                <td>{{ doc.id }}</td>
+                <td>{{ doc.filename }}</td>
+                <td>{{ doc.content_type.split('/')[-1][:20] }}</td>
+                <td>{{ "%.1f KB" | format(doc.size / 1024) if doc.size >= 1024 else "%d B" | format(doc.size) }}</td>
+                <td>{{ doc.upload_timestamp[:19] | replace("T", " ") }}</td>
+                <td><a href="/documents/{{ doc.id }}/download">Download</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Pagination -->
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="/?page={{ page - 1 }}&page_size={{ page_size }}">&laquo; Prev</a>
+        {% else %}
+        <a class="disabled">&laquo; Prev</a>
+        {% endif %}
+
+        <span>Page {{ page }} of {{ total_pages }}</span>
+
+        {% if page < total_pages %}
+        <a href="/?page={{ page + 1 }}&page_size={{ page_size }}">Next &raquo;</a>
+        {% else %}
+        <a class="disabled">Next &raquo;</a>
+        {% endif %}
+    </div>
+    {% else %}
+    <p class="empty">No documents uploaded yet.</p>
+    {% endif %}
+</body>
+</html>
