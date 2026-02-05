@@ -1,19 +1,38 @@
+import logging
 import math
+import secrets
 from pathlib import PurePath
 
-from fastapi import APIRouter, File, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from itsdangerous import BadSignature, URLSafeSerializer
 
 from app import config
 from app.database import get_db
-from app.routes import upload_document
+from app.routes import delete_document, upload_document
+
+logger = logging.getLogger(__name__)
 
 templates = Jinja2Templates(
     directory=str(config.BASE_DIR / "app" / "templates")
 )
 
 router = APIRouter()
+
+_csrf_serializer = URLSafeSerializer(config.CSRF_SECRET, salt="csrf")
+
+
+def _generate_csrf_token() -> str:
+    return _csrf_serializer.dumps(secrets.token_hex(16))
+
+
+def _validate_csrf_token(token: str) -> bool:
+    try:
+        _csrf_serializer.loads(token)
+        return True
+    except BadSignature:
+        return False
 
 
 def _get_page_context(page: int, page_size: int):
@@ -45,10 +64,22 @@ async def index(
     request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
+    msg: str | None = Query(None),
 ):
     ctx = _get_page_context(page, page_size)
+    message = None
+    success = True
+    if msg == "ok":
+        message = "Document uploaded successfully."
+    elif msg == "deleted":
+        message = "Document deleted."
+    elif msg == "err":
+        message = "Upload failed. Please try again."
+
+    csrf_token = _generate_csrf_token()
     return templates.TemplateResponse(
-        request, "index.html", {**ctx, "message": None, "success": True}
+        request, "index.html",
+        {**ctx, "message": message, "success": success, "csrf_token": csrf_token},
     )
 
 
@@ -56,30 +87,55 @@ async def index(
 async def index_upload(
     request: Request,
     file: UploadFile = File(...),
+    csrf_token: str = Form(""),
 ):
+    if not _validate_csrf_token(csrf_token):
+        ctx = _get_page_context(1, 10)
+        new_csrf = _generate_csrf_token()
+        return templates.TemplateResponse(
+            request, "index.html",
+            {**ctx, "message": "Invalid CSRF token. Please try again.", "success": False, "csrf_token": new_csrf},
+        )
+
     suffix = PurePath(file.filename or "").suffix.lower()
 
     if not file.filename or suffix not in config.ALLOWED_TYPES:
         ctx = _get_page_context(1, 10)
-        msg = f"Unsupported file type. Allowed: PDF, TXT, DOCX"
+        new_csrf = _generate_csrf_token()
         return templates.TemplateResponse(
-            request, "index.html", {**ctx, "message": msg, "success": False}
+            request, "index.html",
+            {**ctx, "message": "Unsupported file type. Allowed: PDF, TXT, DOCX", "success": False, "csrf_token": new_csrf},
         )
 
     content = await file.read()
     if len(content) == 0:
         ctx = _get_page_context(1, 10)
+        new_csrf = _generate_csrf_token()
         return templates.TemplateResponse(
             request, "index.html",
-            {**ctx, "message": "File must not be empty.", "success": False},
+            {**ctx, "message": "File must not be empty.", "success": False, "csrf_token": new_csrf},
         )
 
     # Reset file position and delegate to the API handler
     await file.seek(0)
-    await upload_document(file)
+    try:
+        await upload_document(file)
+    except Exception as e:
+        logger.error("Upload failed via UI: %s", e)
+        return RedirectResponse("/?msg=err", status_code=303)
 
-    ctx = _get_page_context(1, 10)
-    return templates.TemplateResponse(
-        request, "index.html",
-        {**ctx, "message": f"Uploaded '{file.filename}' successfully.", "success": True},
-    )
+    # Post-Redirect-Get: redirect to avoid duplicate on refresh
+    return RedirectResponse("/?msg=ok", status_code=303)
+
+
+@router.post("/delete/{document_id}")
+async def index_delete(request: Request, document_id: int, csrf_token: str = Form("")):
+    if not _validate_csrf_token(csrf_token):
+        return RedirectResponse("/", status_code=303)
+
+    try:
+        await delete_document(document_id)
+    except Exception as e:
+        logger.error("Delete failed via UI: %s", e)
+
+    return RedirectResponse("/?msg=deleted", status_code=303)

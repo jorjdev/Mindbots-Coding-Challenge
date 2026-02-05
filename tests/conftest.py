@@ -12,6 +12,22 @@ def client(tmp_path, monkeypatch):
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     monkeypatch.setattr(config, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(config, "API_KEY", None)  # disable auth for most tests
+    monkeypatch.setattr(config, "MAX_FILE_SIZE", 10 * 1024 * 1024)
+    init_db()
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def auth_client(tmp_path, monkeypatch):
+    """Client with API key auth enabled."""
+    monkeypatch.setattr(config, "DATABASE_PATH", tmp_path / "test.db")
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    monkeypatch.setattr(config, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(config, "API_KEY", "test-secret-key")
+    monkeypatch.setattr(config, "MAX_FILE_SIZE", 10 * 1024 * 1024)
     init_db()
     with TestClient(app) as c:
         yield c

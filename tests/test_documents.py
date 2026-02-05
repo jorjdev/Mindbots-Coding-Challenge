@@ -1,6 +1,8 @@
 import io
 
-from app.config import UPLOAD_DIR
+import magic
+
+from app import config
 
 
 # --- Upload tests ---
@@ -57,10 +59,41 @@ def test_upload_no_file(client):
     assert response.status_code == 400
 
 
+def test_upload_file_too_large(client, monkeypatch):
+    monkeypatch.setattr(config, "MAX_FILE_SIZE", 100)  # 100 bytes
+    content = b"%PDF-1.4 " + b"x" * 200
+    response = client.post(
+        "/documents", files={"file": ("big.pdf", io.BytesIO(content), "application/pdf")}
+    )
+    assert response.status_code == 413
+
+
+def test_upload_magic_byte_mismatch(client):
+    """Upload a .pdf file that actually contains plain text — should be rejected."""
+    content = b"This is just plain text, not a PDF"
+    response = client.post(
+        "/documents", files={"file": ("fake.pdf", io.BytesIO(content), "application/pdf")}
+    )
+    assert response.status_code == 415
+    assert "content does not match" in response.json()["detail"]
+
+
+def test_upload_filename_sanitized(client):
+    """Filenames with path traversal or special chars should be sanitized."""
+    content = b"%PDF-1.4 data"
+    response = client.post(
+        "/documents", files={"file": ("../../etc/evil.pdf", io.BytesIO(content), "application/pdf")}
+    )
+    assert response.status_code == 201
+    data = response.json()
+    assert "/" not in data["filename"]
+    assert ".." not in data["filename"]
+
+
 # --- List tests ---
 
 
-def _upload_file(client, name="test.pdf", content=b"%PDF-1.4 data"):
+def _upload_file(client, name="test.txt", content=b"Hello, world!"):
     return client.post("/documents", files={"file": (name, io.BytesIO(content), "application/octet-stream")})
 
 
@@ -76,7 +109,7 @@ def test_list_empty(client):
 
 def test_list_default_pagination(client):
     for i in range(3):
-        _upload_file(client, name=f"file{i}.pdf")
+        _upload_file(client, name=f"file{i}.txt")
     response = client.get("/documents")
     assert response.status_code == 200
     data = response.json()
@@ -86,7 +119,7 @@ def test_list_default_pagination(client):
 
 def test_list_with_pagination(client):
     for i in range(5):
-        _upload_file(client, name=f"file{i}.pdf")
+        _upload_file(client, name=f"file{i}.txt")
 
     response = client.get("/documents", params={"page": 2, "page_size": 2})
     assert response.status_code == 200
@@ -124,7 +157,7 @@ def test_get_document(client):
     assert response.status_code == 200
     data = response.json()
     assert data["id"] == doc_id
-    assert data["filename"] == "test.pdf"
+    assert data["filename"] == "test.txt"
 
 
 def test_get_document_not_found(client):
@@ -148,3 +181,41 @@ def test_download_document(client):
 def test_download_not_found(client):
     response = client.get("/documents/999/download")
     assert response.status_code == 404
+
+
+# --- Delete tests ---
+
+
+def test_delete_document(client):
+    upload = _upload_file(client)
+    doc_id = upload.json()["id"]
+
+    response = client.delete(f"/documents/{doc_id}")
+    assert response.status_code == 204
+
+    # Verify it's gone
+    response = client.get(f"/documents/{doc_id}")
+    assert response.status_code == 404
+
+
+def test_delete_not_found(client):
+    response = client.delete("/documents/999")
+    assert response.status_code == 404
+
+
+# --- Auth tests ---
+
+
+def test_api_key_required_when_set(auth_client):
+    response = auth_client.get("/documents")
+    assert response.status_code == 401
+
+
+def test_api_key_accepted(auth_client):
+    response = auth_client.get("/documents", headers={"X-API-Key": "test-secret-key"})
+    assert response.status_code == 200
+
+
+def test_api_key_wrong(auth_client):
+    response = auth_client.get("/documents", headers={"X-API-Key": "wrong-key"})
+    assert response.status_code == 401

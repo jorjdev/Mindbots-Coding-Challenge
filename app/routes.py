@@ -1,15 +1,28 @@
+import logging
+import re
 from datetime import datetime, timezone
 from pathlib import PurePath
 from uuid import uuid4
 
+import magic
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app import config
 from app.database import get_db
 from app.models import DocumentListResponse, DocumentMetadata
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+def _sanitize_filename(filename: str) -> str:
+    name = PurePath(filename).name  # strip directory components
+    name = re.sub(r"[^\w.\-]", "_", name)  # keep alphanumeric, dot, hyphen, underscore
+    if len(name) > 255:
+        name = name[:255]
+    return name
 
 
 @router.post("/documents", response_model=DocumentMetadata, status_code=201)
@@ -28,8 +41,28 @@ async def upload_document(file: UploadFile = File(...)):
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="File must not be empty")
 
+    if len(content) > config.MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {config.MAX_FILE_SIZE // (1024 * 1024)} MB",
+        )
+
+    # Magic byte validation
+    detected_mime = magic.from_buffer(content, mime=True)
+    allowed_mimes = config.ALLOWED_MAGIC.get(suffix, set())
+    if detected_mime not in allowed_mimes:
+        logger.warning(
+            "Magic byte mismatch: filename=%s extension=%s detected=%s",
+            file.filename, suffix, detected_mime,
+        )
+        raise HTTPException(
+            status_code=415,
+            detail=f"File content does not match extension '{suffix}' (detected: {detected_mime})",
+        )
+
+    safe_filename = _sanitize_filename(file.filename)
     content_type = config.ALLOWED_TYPES[suffix]
-    storage_name = f"{uuid4()}_{file.filename}"
+    storage_name = f"{uuid4()}_{safe_filename}"
     storage_path = config.UPLOAD_DIR / storage_name
 
     storage_path.write_bytes(content)
@@ -39,16 +72,18 @@ async def upload_document(file: UploadFile = File(...)):
     try:
         cursor = conn.execute(
             "INSERT INTO documents (filename, size, content_type, upload_timestamp, storage_path) VALUES (?, ?, ?, ?, ?)",
-            (file.filename, len(content), content_type, timestamp, storage_name),
+            (safe_filename, len(content), content_type, timestamp, storage_name),
         )
         conn.commit()
         doc_id = cursor.lastrowid
     finally:
         conn.close()
 
+    logger.info("Uploaded document id=%d filename=%s size=%d", doc_id, safe_filename, len(content))
+
     return DocumentMetadata(
         id=doc_id,
-        filename=file.filename,
+        filename=safe_filename,
         size=len(content),
         content_type=content_type,
         upload_timestamp=timestamp,
@@ -131,3 +166,26 @@ async def download_document(document_id: int):
         media_type=row["content_type"],
         filename=row["filename"],
     )
+
+
+@router.delete("/documents/{document_id}", status_code=204)
+async def delete_document(document_id: int):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Delete file from disk (ignore if already gone)
+        file_path = config.UPLOAD_DIR / row["storage_path"]
+        file_path.unlink(missing_ok=True)
+
+        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger.info("Deleted document id=%d", document_id)
+    return Response(status_code=204)
